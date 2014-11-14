@@ -3,10 +3,10 @@ import notmuch as notmuch_local
 import pushy.protocol.proxy
 from ConfigParser import ConfigParser
 from time import sleep
-import os
+import os as os_local
 
 conf = ConfigParser(allow_no_value=True)
-conf.read(os.path.expanduser('~/.notmuch-pushy-config'))
+conf.read(os_local.path.expanduser('~/.notmuch-pushy-config'))
 
 host = conf.get('remote', 'host')
 conn = pushy.connect('ssh:' + host)
@@ -44,12 +44,11 @@ def check_no_two_way_sync(local_msgs, remote_msgs):
     assert local_msg_ids.isdisjoint(remote_msg_ids)
 
 
-def sync_msg_files(db_dest, msg_src, transfer_file):
+def sync_msg_files(db_dest, msg_src, copy_file):
     filenames = [str(f) for f in msg_src.get_filenames()]
     first_msg_dest = None
     for f in filenames:
-        # TODO only copy file is required, check with os.path.exists
-        transfer_file(f, f)
+        copy_file(f)
     for f in filenames:
         (msg_dest, status) = db_dest.add_message(f)
         if first_msg_dest:
@@ -60,11 +59,24 @@ def sync_msg_files(db_dest, msg_src, transfer_file):
     return msg_dest
 
 
-def sync_msg(msg_src, db_dest, transfer_file, sync_tag):
+def sync_msg(msg_src, db_dest, copy_file, sync_tag, os_dest):
     print msg_src
     msg_id = msg_src.get_message_id()
-    msg_dest = (db_dest.find_message(msg_id)
-        or sync_msg_files(db_dest, msg_src, transfer_file))
+    msg_dest = db_dest.find_message(msg_id)
+    if msg_dest:
+        dest_tags = [unicode(tag) for tag in msg_src.get_tags()]
+        src_filenames = [str(f) for f in msg_src.get_filenames()]
+        dest_filenames = [str(f) for f in msg_dest.get_filenames()]
+        if u'learn-spam' in dest_tags or u'learn-ham' in dest_tags:
+            assert len(dest_filenames) == 1 and len(src_filenames) == 1
+            os_dest.remove(dest_filenames[0])
+            for f in src_filenames:
+                copy_file(f)
+        elif len(src_filenames) > len(dest_filenames):
+            for f in src_filenames:
+                copy_file(f)
+    else:
+        msg_dest = sync_msg_files(db_dest, msg_src, copy_file)
     msg_dest.freeze()
     msg_dest.remove_all_tags(False)
     tags = [unicode(tag) for tag in msg_src.get_tags()]
@@ -92,6 +104,13 @@ def any_changes():
     return changes
 
 
+def mk_copy_file(os, transfer_file):
+    def copy_file(f):
+        if not os.path.exists(f):
+            transfer_file(f, f)
+    return copy_file
+
+
 def sync():
     db_local = get_db_rw_retry(notmuch_local)
     db_remote = get_db_rw_retry(notmuch_remote)
@@ -102,9 +121,11 @@ def sync():
     check_no_two_way_sync(local_msgs, remote_msgs)
 
     for msg in local_msgs:
-        sync_msg(msg, db_remote, conn.putfile, local_sync_tag)
+        copy_file = mk_copy_file(os_remote, conn.putfile)
+        sync_msg(msg, db_remote, copy_file, local_sync_tag, os_remote)
     for msg in remote_msgs:
-        sync_msg(msg, db_local, conn.getfile, remote_sync_tag)
+        copy_file = mk_copy_file(os_local, conn.getfile)
+        sync_msg(msg, db_local, copy_file, remote_sync_tag, os_local)
 
     db_local.close()
     db_remote.close()
